@@ -41,7 +41,7 @@ header h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: 
 header p { margin: 0; color: var(--ink-2); max-width: 78ch; }
 .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
 .bar .spacer { flex: 1; }
-button.ctl { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button.ctl, select.ctl { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
 button.ctl:hover { border-color: var(--axis); }
 button.ctl:focus-visible, .chip:focus-visible, svg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .stat { color: var(--ink-2); font-size: 13px; }
@@ -97,13 +97,19 @@ table.grid td.na { color: var(--muted); }
 <div class="wrap">
   <header>
     <h1>RisingWave CI Step Timing</h1>
-    <p>Run time of every Buildkite <code>pull-request</code> job, per build, for the last 100 commits on <code>main</code>. Older commits are on the left. For the 13 commits whose merge-queue build skipped every job (tree identical to the already-tested PR head), the PR head's own build is shown instead and flagged in the readout. Times are the final attempt only, excluding queue wait and spot-reclaimed attempts.</p>
+    <p>Run time of every Buildkite <code>pull-request</code> job, per build, for each commit on <code>main</code>. Older commits are on the left. For commits whose merge-queue build skipped every job (tree identical to the already-tested PR head), the PR head's own build is shown instead and flagged in the readout. Times are the final attempt only, excluding queue wait and spot-reclaimed attempts.</p>
   </header>
 
   <div class="bar">
     <button class="ctl" id="allOn">Show all steps</button>
     <button class="ctl" id="allOff">Hide all steps</button>
     <button class="ctl" id="colorOnly">Colored families only</button>
+    <label class="stat" for="window">Show <select id="window" class="ctl">
+      <option value="100" selected>last 100 commits</option>
+      <option value="250">last 250 commits</option>
+      <option value="500">last 500 commits</option>
+      <option value="0">all commits</option>
+    </select></label>
     <span class="spacer"></span>
     <span class="stat" id="stat"></span>
     <button class="ctl" id="tableBtn" aria-pressed="false">Table view</button>
@@ -121,12 +127,18 @@ table.grid td.na { color: var(--muted); }
 </div>
 
 <script>
-function main(DATA) {
-  const N = DATA.commits.length;
+function main(FULL) {
+  let DATA = FULL, N = 0;
   const colorVars = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7'];
   const famColor = {};
   DATA.families.forEach((f, i) => { famColor[f] = i < colorVars.length ? `var(${colorVars[i]})` : 'var(--other)'; });
-  const steps = DATA.steps.map((s, i) => ({ ...s, id: i, color: famColor[s.family], colored: colorVars.length > DATA.families.indexOf(s.family) }));
+  const steps = FULL.steps.map((s, i) => ({ ...s, fullRun: s.run, fullAtt: s.attempts, id: i, color: famColor[s.family], colored: colorVars.length > FULL.families.indexOf(s.family) }));
+  function applyWindow(n) {
+    const start = n > 0 ? Math.max(0, FULL.commits.length - n) : 0;
+    DATA = { ...FULL, commits: FULL.commits.slice(start) };
+    N = DATA.commits.length;
+    for (const s of steps) { s.run = s.fullRun.slice(start); s.attempts = s.fullAtt.slice(start); }
+  }
   const visible = new Set(steps.map(s => s.id));
   let hot = null;          // highlighted step id
   let hoverIdx = null;     // hovered commit index
@@ -309,8 +321,9 @@ function main(DATA) {
     }
   }
   function sync() {
-    for (const [id, c] of chips) { const on = visible.has(id); c.classList.toggle('off', !on); c.setAttribute('aria-pressed', String(on)); }
-    document.getElementById('stat').textContent = visible.size + ' of ' + steps.length + ' steps shown · ' + N + ' commits, ' + DATA.commits[0].date.slice(0, 10) + ' to ' + DATA.commits[N - 1].date.slice(0, 10) + (DATA.generated_at ? ' · data from ' + DATA.generated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '');
+    let present = 0;
+    for (const [id, c] of chips) { const on = visible.has(id); c.classList.toggle('off', !on); c.setAttribute('aria-pressed', String(on)); const s = steps[id]; c.hidden = s.run.every(v => v == null); if (!c.hidden) present++; }
+    document.getElementById('stat').textContent = visible.size + ' of ' + present + ' steps shown · ' + N + ' commits, ' + DATA.commits[0].date.slice(0, 10) + ' to ' + DATA.commits[N - 1].date.slice(0, 10) + (DATA.generated_at ? ' · last fetched ' + DATA.generated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '');
     draw();
     if (!document.getElementById('tableBox').hidden) buildTable();
   }
@@ -346,15 +359,30 @@ function main(DATA) {
     if (show) buildTable();
   });
 
+  const windowSel = document.getElementById('window');
+  windowSel.addEventListener('change', () => { applyWindow(+windowSel.value); pinned = false; hoverIdx = null; sync(); });
   buildLegend();
+  applyWindow(+windowSel.value);
   sync();
   let raf = null;
   new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }).observe(svg);
 }
-fetch('data.json', { cache: 'no-cache' })
-  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-  .then(main)
-  .catch(err => { document.getElementById('stat').textContent = 'Could not load data.json (' + err.message + ')'; });
+function fromJsonl(text) {
+  const rows = text.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+  const famTotal = new Map(), stepFam = new Map();
+  for (const r of rows) for (const j of r.jobs) { famTotal.set(j.family, (famTotal.get(j.family) || 0) + (j.run || 0)); stepFam.set(j.step, j.family); }
+  const families = [...famTotal.keys()].sort((a, b) => famTotal.get(b) - famTotal.get(a));
+  const names = [...stepFam.keys()].sort((a, b) => (stepFam.get(a) + '\u0000' + a).localeCompare(stepFam.get(b) + '\u0000' + b));
+  const idx = new Map(names.map((n, i) => [n, i]));
+  const steps = names.map(n => ({ step: n, family: stepFam.get(n), run: rows.map(() => null), attempts: rows.map(() => null) }));
+  rows.forEach((r, i) => r.jobs.forEach(j => { const s = steps[idx.get(j.step)]; s.run[i] = j.run; s.attempts[i] = j.attempts; }));
+  return { commits: rows.map(r => ({ sha: r.sha.slice(0, 10), date: r.date, subject: r.subject, pr: r.pr, build: r.build, src: r.src })),
+           families, steps, generated_at: rows.length ? rows[rows.length - 1].fetched_at : null };
+}
+fetch('commits.jsonl', { cache: 'no-cache' })
+  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+  .then(t => main(fromJsonl(t)))
+  .catch(err => { document.getElementById('stat').textContent = 'Could not load commits.jsonl (' + err.message + ')'; });
 </script>
 
 </body>
