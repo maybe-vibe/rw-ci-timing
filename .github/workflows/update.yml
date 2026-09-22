@@ -2,7 +2,8 @@ name: Update CI timing data
 
 on:
   schedule:
-    - cron: "17 6 * * *"
+    # 08:23 UTC+8: after the overnight lull, before the 09:00 UTC+8 merges start.
+    - cron: "23 0 * * *"
   workflow_dispatch:
   push:
     branches: [main]
